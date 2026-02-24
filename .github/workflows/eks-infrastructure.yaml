@@ -139,19 +139,33 @@ jobs:
         terraform destroy -auto-approve -var-file=../variables.tfvars
       working-directory: ./eks
 
+    - name: Cleanup VPC Dependencies
+      if: github.event.inputs.module == 'vpc-ec2'
+      run: |
+        VPC_ID="vpc-03a1c81706ef537f2"
+        
+        # Delete all ENIs
+        for eni in $(aws ec2 describe-network-interfaces --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text); do
+          aws ec2 delete-network-interface --region ${{ env.AWS_REGION }} --network-interface-id $eni 2>/dev/null || true
+        done
+        
+        # Delete NAT Gateways
+        for ngw in $(aws ec2 describe-nat-gateways --region ${{ env.AWS_REGION }} --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" --query 'NatGateways[*].NatGatewayId' --output text); do
+          aws ec2 delete-nat-gateway --region ${{ env.AWS_REGION }} --nat-gateway-id $ngw
+        done
+        
+        # Delete Internet Gateways
+        for igw in $(aws ec2 describe-internet-gateways --region ${{ env.AWS_REGION }} --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query 'InternetGateways[*].InternetGatewayId' --output text); do
+          aws ec2 detach-internet-gateway --region ${{ env.AWS_REGION }} --internet-gateway-id $igw --vpc-id $VPC_ID 2>/dev/null || true
+          aws ec2 delete-internet-gateway --region ${{ env.AWS_REGION }} --internet-gateway-id $igw 2>/dev/null || true
+        done
+        
+        echo "Waiting 90 seconds for AWS cleanup..."
+        sleep 90
+
     - name: Destroy VPC/EC2
       if: github.event.inputs.module == 'vpc-ec2'
       run: |
         terraform init
-        terraform destroy -auto-approve -var-file=../variables.tfvars || (
-          echo "VPC has dependencies, cleaning up..."
-          VPC_ID=$(terraform output -raw vpc-id 2>/dev/null || aws ec2 describe-vpcs --region ${{ env.AWS_REGION }} --filters "Name=tag:Name,Values=*vpc" --query 'Vpcs[0].VpcId' --output text)
-          
-          # Delete ENIs
-          aws ec2 describe-network-interfaces --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[?Status==`available`].NetworkInterfaceId' --output text | xargs -r -n1 aws ec2 delete-network-interface --region ${{ env.AWS_REGION }} --network-interface-id
-          
-          # Wait and retry
-          sleep 30
-          terraform destroy -auto-approve -var-file=../variables.tfvars
-        )
+        terraform destroy -auto-approve -var-file=../variables.tfvars
       working-directory: ./vpc-ec2
