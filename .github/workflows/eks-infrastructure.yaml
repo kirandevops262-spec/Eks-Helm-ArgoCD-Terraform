@@ -143,5 +143,15 @@ jobs:
       if: github.event.inputs.module == 'vpc-ec2'
       run: |
         terraform init
-        terraform destroy -auto-approve -var-file=../variables.tfvars
+        terraform destroy -auto-approve -var-file=../variables.tfvars || (
+          echo "VPC has dependencies, cleaning up..."
+          VPC_ID=$(terraform output -raw vpc-id 2>/dev/null || aws ec2 describe-vpcs --region ${{ env.AWS_REGION }} --filters "Name=tag:Name,Values=*vpc" --query 'Vpcs[0].VpcId' --output text)
+          
+          # Delete ENIs
+          aws ec2 describe-network-interfaces --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[?Status==`available`].NetworkInterfaceId' --output text | xargs -r -n1 aws ec2 delete-network-interface --region ${{ env.AWS_REGION }} --network-interface-id
+          
+          # Wait and retry
+          sleep 30
+          terraform destroy -auto-approve -var-file=../variables.tfvars
+        )
       working-directory: ./vpc-ec2
