@@ -22,7 +22,6 @@ terraform {
     bucket       = "dev-tarak01-tf-bucket"
     region       = "us-east-1"
     key          = "EKS-ArgoCD-AWS-LB-Controller-Terraform/eks.tfstate"
-    use_lockfile = true
     encrypt      = true
   }
 }
