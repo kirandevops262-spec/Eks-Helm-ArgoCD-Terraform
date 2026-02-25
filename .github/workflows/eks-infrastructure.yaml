@@ -142,9 +142,35 @@ jobs:
     - name: Cleanup VPC Dependencies
       if: github.event.inputs.module == 'vpc-ec2'
       run: |
-        VPC_ID="vpc-03a1c81706ef537f2"
+        cd vpc-ec2
+        terraform init
         
-        # Delete all ENIs
+        # Get VPC ID from Terraform state
+        VPC_ID=$(terraform state show 'module.vpc-ec2.aws_vpc.vpc' 2>/dev/null | grep -oP '(?<=id\s{1,}=\s")vpc-[a-z0-9]+' || echo "")
+        
+        if [ -z "$VPC_ID" ]; then
+          echo "VPC already destroyed or not found in state"
+          exit 0
+        fi
+        
+        echo "Cleaning up VPC: $VPC_ID"
+        
+        # Delete Load Balancers
+        for lb in $(aws elbv2 describe-load-balancers --region ${{ env.AWS_REGION }} --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text); do
+          aws elbv2 delete-load-balancer --region ${{ env.AWS_REGION }} --load-balancer-arn $lb
+        done
+        
+        # Delete Target Groups
+        for tg in $(aws elbv2 describe-target-groups --region ${{ env.AWS_REGION }} --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" --output text); do
+          aws elbv2 delete-target-group --region ${{ env.AWS_REGION }} --target-group-arn $tg 2>/dev/null || true
+        done
+        
+        # Delete Security Groups (except default)
+        for sg in $(aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text); do
+          aws ec2 delete-security-group --region ${{ env.AWS_REGION }} --group-id $sg 2>/dev/null || true
+        done
+        
+        # Delete ENIs
         for eni in $(aws ec2 describe-network-interfaces --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text); do
           aws ec2 delete-network-interface --region ${{ env.AWS_REGION }} --network-interface-id $eni 2>/dev/null || true
         done
@@ -154,14 +180,13 @@ jobs:
           aws ec2 delete-nat-gateway --region ${{ env.AWS_REGION }} --nat-gateway-id $ngw
         done
         
-        # Delete Internet Gateways
-        for igw in $(aws ec2 describe-internet-gateways --region ${{ env.AWS_REGION }} --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query 'InternetGateways[*].InternetGatewayId' --output text); do
-          aws ec2 detach-internet-gateway --region ${{ env.AWS_REGION }} --internet-gateway-id $igw --vpc-id $VPC_ID 2>/dev/null || true
-          aws ec2 delete-internet-gateway --region ${{ env.AWS_REGION }} --internet-gateway-id $igw 2>/dev/null || true
-        done
+        echo "Waiting 120 seconds for AWS cleanup..."
+        sleep 120
         
-        echo "Waiting 90 seconds for AWS cleanup..."
-        sleep 90
+        # Release Elastic IPs
+        for eip in $(aws ec2 describe-addresses --region ${{ env.AWS_REGION }} --filters "Name=domain,Values=vpc" --query 'Addresses[*].AllocationId' --output text); do
+          aws ec2 release-address --region ${{ env.AWS_REGION }} --allocation-id $eip 2>/dev/null || true
+        done
 
     - name: Destroy VPC/EC2
       if: github.event.inputs.module == 'vpc-ec2'
