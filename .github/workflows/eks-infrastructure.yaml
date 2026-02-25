@@ -142,55 +142,17 @@ jobs:
     - name: Cleanup VPC Dependencies
       if: github.event.inputs.module == 'vpc-ec2'
       run: |
-        cd vpc-ec2
         terraform init
         
-        # Get VPC ID from Terraform state
-        VPC_ID=$(terraform state show 'module.vpc-ec2.aws_vpc.vpc' 2>/dev/null | grep -oP '(?<=id\s{1,}=\s")vpc-[a-z0-9]+' || echo "")
-        
-        if [ -z "$VPC_ID" ]; then
-          echo "VPC already destroyed or not found in state"
-          exit 0
-        fi
-        
-        echo "Cleaning up VPC: $VPC_ID"
-        
-        # Delete Load Balancers
-        for lb in $(aws elbv2 describe-load-balancers --region ${{ env.AWS_REGION }} --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text); do
-          aws elbv2 delete-load-balancer --region ${{ env.AWS_REGION }} --load-balancer-arn $lb
-        done
-        
-        # Delete Target Groups
-        for tg in $(aws elbv2 describe-target-groups --region ${{ env.AWS_REGION }} --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" --output text); do
-          aws elbv2 delete-target-group --region ${{ env.AWS_REGION }} --target-group-arn $tg 2>/dev/null || true
-        done
-        
-        # Delete Security Groups (except default)
-        for sg in $(aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text); do
-          aws ec2 delete-security-group --region ${{ env.AWS_REGION }} --group-id $sg 2>/dev/null || true
-        done
-        
-        # Delete ENIs
-        for eni in $(aws ec2 describe-network-interfaces --region ${{ env.AWS_REGION }} --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text); do
-          aws ec2 delete-network-interface --region ${{ env.AWS_REGION }} --network-interface-id $eni 2>/dev/null || true
-        done
-        
-        # Delete NAT Gateways
-        for ngw in $(aws ec2 describe-nat-gateways --region ${{ env.AWS_REGION }} --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" --query 'NatGateways[*].NatGatewayId' --output text); do
-          aws ec2 delete-nat-gateway --region ${{ env.AWS_REGION }} --nat-gateway-id $ngw
-        done
-        
-        echo "Waiting 120 seconds for AWS cleanup..."
-        sleep 120
-        
-        # Release Elastic IPs
-        for eip in $(aws ec2 describe-addresses --region ${{ env.AWS_REGION }} --filters "Name=domain,Values=vpc" --query 'Addresses[*].AllocationId' --output text); do
-          aws ec2 release-address --region ${{ env.AWS_REGION }} --allocation-id $eip 2>/dev/null || true
-        done
+        # Destroy in order: EC2 -> Subnets -> NAT -> IGW -> VPC
+        terraform destroy -target=module.vpc-ec2.aws_instance.ec2 -auto-approve -var-file=../variables.tfvars || true
+        terraform destroy -target=module.vpc-ec2.aws_nat_gateway.ngw -auto-approve -var-file=../variables.tfvars || true
+        sleep 60
+        terraform destroy -target=module.vpc-ec2.aws_eip.eip -auto-approve -var-file=../variables.tfvars || true
+        terraform destroy -target=module.vpc-ec2.aws_internet_gateway.igw -auto-approve -var-file=../variables.tfvars || true
+      working-directory: ./vpc-ec2
 
     - name: Destroy VPC/EC2
       if: github.event.inputs.module == 'vpc-ec2'
-      run: |
-        terraform init
-        terraform destroy -auto-approve -var-file=../variables.tfvars
+      run: terraform destroy -auto-approve -var-file=../variables.tfvars
       working-directory: ./vpc-ec2
