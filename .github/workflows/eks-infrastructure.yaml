@@ -154,5 +154,7 @@ jobs:
 
     - name: Destroy VPC/EC2
       if: github.event.inputs.module == 'vpc-ec2'
-      run: terraform destroy -auto-approve -var-file=../variables.tfvars
+      run: |
+          terraform init
+          terraform destroy -auto-approve -var-file=../variables.tfvars
       working-directory: ./vpc-ec2
